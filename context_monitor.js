@@ -2604,9 +2604,6 @@
 
         function resolveActiveQuotaSummary(inst, quota) {
             if (!quota) return null;
-            if (quota.current && typeof quota.current.remainingFraction === 'number') {
-                return quota.current;
-            }
             const domModel = readDomSelectedModelText(inst);
             const groups = Array.isArray(quota.groups) ? quota.groups : [];
             if (domModel && groups.length > 0) {
@@ -2626,6 +2623,9 @@
                         resetTime: b.resetTime,
                     };
                 }
+            }
+            if (quota.current && typeof quota.current.remainingFraction === 'number') {
+                return quota.current;
             }
             if (groups.length > 0 && Array.isArray(groups[0].buckets) && groups[0].buckets.length > 0) {
                 const grp = groups[0];
@@ -2663,7 +2663,7 @@
 
             const groupNodes = [];
             for (const g of groups) {
-                const isCur = Boolean(g.isCurrent || (activeGroupName && g.displayName === activeGroupName));
+                const isCur = activeGroupName ? g.displayName === activeGroupName : Boolean(g.isCurrent);
                 const headChildren = [h('span', null, g.displayName)];
                 if (isCur) headChildren.push(h('span', { class: 'quota-group-dot', title: '当前对话模型所属分组' }));
 
@@ -2896,13 +2896,19 @@
                 }
                 const moved = ensureInstanceUi(inst, comp);
                 const nextId = resolveConversationId(comp);
+                const nextDomModel = readDomSelectedModelText(inst);
                 if (isNew || nextId !== inst.conversationId) {
                     inst.conversationId = nextId;
+                    inst.lastDomModel = nextDomModel;
                     inst.fetchEpoch++;
                     inst.latestPayload = null;
                     inst.lastFetchAt = 0;
                     inst.lastToolbarWidth = -1;
                     inst.isFetching = false;
+                    renderInstance(inst);
+                    void refreshInstance(inst, true);
+                } else if (nextDomModel !== inst.lastDomModel) {
+                    inst.lastDomModel = nextDomModel;
                     renderInstance(inst);
                     void refreshInstance(inst, true);
                 } else if (moved || (comp.toolbar && comp.toolbar.clientWidth !== inst.lastToolbarWidth)) {
@@ -2937,6 +2943,7 @@
         domObserver.observe(document.documentElement, {
             childList: true,
             subtree: true,
+            characterData: true,
             attributes: true,
             attributeFilter: ['class', 'style', 'hidden', 'inert', 'data-cascade-id', 'data-testid'],
         });
