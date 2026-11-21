@@ -490,6 +490,8 @@
     }
 
     const MODEL_CATALOG_TTL_MS = 45 * 1000;
+    const QUOTA_SUMMARY_TTL_MS = 10 * 1000;
+    const QUOTA_FORCE_COOLDOWN_MS = 3 * 1000;
     const CONTROL_CHARS_RE = /[\x00-\x1f\x7f\u202a-\u202e\u2066-\u2069]/g;
     const EFFORT_SUFFIX_RE = /^(.+?)[-_ ](thinking|xhigh|high|medium|low)$/i;
     const UPPER_ACRONYMS = new Map([
@@ -632,13 +634,17 @@
             quotaSummaryCache = { endpointKey: endpoint.key, groups: [], fetchedAt: 0, pending: null };
         }
         const age = Date.now() - quotaSummaryCache.fetchedAt;
-        const ttl = quotaSummaryCache.groups.length > 0 ? MODEL_CATALOG_TTL_MS : 15000;
-        if (!force && quotaSummaryCache.fetchedAt > 0 && age < ttl) {
-            return quotaSummaryCache.groups;
+        const ttl = quotaSummaryCache.groups.length > 0 ? QUOTA_SUMMARY_TTL_MS : 5000;
+        if (quotaSummaryCache.fetchedAt > 0) {
+            if (!force && age < ttl) return quotaSummaryCache.groups;
+            if (force && age < QUOTA_FORCE_COOLDOWN_MS && quotaSummaryCache.groups.length > 0) {
+                return quotaSummaryCache.groups;
+            }
         }
         if (quotaSummaryCache.pending) return quotaSummaryCache.pending;
 
-        quotaSummaryCache.pending = callLsRpc(endpoint, 'RetrieveUserQuotaSummary', { forceRefresh: Boolean(force) })
+        const forceCloud = Boolean(force || age >= QUOTA_SUMMARY_TTL_MS);
+        quotaSummaryCache.pending = callLsRpc(endpoint, 'RetrieveUserQuotaSummary', { forceRefresh: forceCloud })
             .then((res) => {
                 const rawGroups = (res && res.response && Array.isArray(res.response.groups))
                     ? res.response.groups
@@ -1138,19 +1144,23 @@
         if (cached && cached.endpointKey === endpoint.key && !force && cached.mark === mark) {
             const ttl = settled ? 10000 : 1200;
             if (now - cached.verifiedAt < ttl) {
-                const quotaAge = Math.max(now - modelCatalogCache.fetchedAt, now - quotaSummaryCache.fetchedAt);
-                if (quotaAge < MODEL_CATALOG_TTL_MS && cached.payload && cached.payload.quota) {
+                const quotaAge = now - quotaSummaryCache.fetchedAt;
+                if (quotaAge < QUOTA_SUMMARY_TTL_MS && cached.payload && cached.payload.quota) {
                     return cached.payload;
                 }
                 const [catalogState, quotaGroups] = await Promise.all([
                     getModelCatalog(endpoint, false),
-                    getQuotaSummary(endpoint, false),
+                    getQuotaSummary(endpoint, true),
                 ]);
                 const freshQuota = buildQuotaPayload(catalogState.quotaEntries, quotaGroups, cached.lastChat, cached.payload && cached.payload.context && cached.payload.context.model);
                 cached.payload = { ...cached.payload, quota: freshQuota };
                 return cached.payload;
             }
         }
+
+        const justSettled = Boolean(cached && !cached.settled && settled);
+        const hasNewSteps = Boolean(cached && stepCount !== null && cached.stepCount !== null && stepCount > cached.stepCount);
+        const shouldForceQuota = Boolean(force || justSettled || hasNewSteps);
 
         const canIncremental = Boolean(
             cached &&
@@ -1168,7 +1178,7 @@
 
         const [catalogState, quotaGroups, initialScan] = await Promise.all([
             getModelCatalog(endpoint, Boolean(force)),
-            getQuotaSummary(endpoint, Boolean(force)),
+            getQuotaSummary(endpoint, shouldForceQuota),
             fetchLatestChatModel(
                 endpoint,
                 id,
@@ -2318,6 +2328,9 @@
                     hoverOpen = true;
                     renderPortalCard(inst);
                     updateCardVisibility();
+                    if (Date.now() - inst.lastFetchAt >= 3000) {
+                        void refreshInstance(inst, true);
+                    }
                 }, 220);
             });
             btn.addEventListener('pointerleave', () => {
@@ -2336,6 +2349,9 @@
                     activeAnchor = anchorName;
                     pinnedOpen = true;
                     renderPortalCard(inst);
+                    if (Date.now() - inst.lastFetchAt >= 3000) {
+                        void refreshInstance(inst, true);
+                    }
                 }
                 updateCardVisibility();
             });
@@ -2961,6 +2977,18 @@
             }
             positionCard();
         });
+
+        const triggerForegroundRefresh = () => {
+            if (document.hidden) return;
+            const now = Date.now();
+            for (const inst of instances.values()) {
+                if (now - inst.lastFetchAt >= 5000) {
+                    void refreshInstance(inst, true);
+                }
+            }
+        };
+        document.addEventListener('visibilitychange', triggerForegroundRefresh);
+        window.addEventListener('focus', triggerForegroundRefresh);
 
         setInterval(() => {
             sync();
