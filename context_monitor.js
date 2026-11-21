@@ -1550,7 +1550,9 @@
                         pointer-events: auto;
                         position: fixed;
                         z-index: 2147483647;
-                        width: 318px;
+                        display: flex;
+                        align-items: stretch;
+                        width: auto;
                         max-width: calc(100vw - 16px);
                         max-height: calc(100vh - 20px);
                         overflow-y: auto;
@@ -1565,6 +1567,12 @@
                         font-size: 12px;
                     }
                     .card[hidden] { display: none; }
+                    .card-main {
+                        width: 288px;
+                        max-width: calc(100vw - 46px);
+                        flex: none;
+                        min-width: 0;
+                    }
                     .card-head {
                         display: flex;
                         align-items: center;
@@ -1620,17 +1628,39 @@
                         transform: rotate(180deg);
                     }
                     .breakdown {
-                        max-height: 236px;
+                        width: 248px;
+                        flex: none;
+                        min-width: 0;
+                        max-height: 360px;
                         overflow-y: auto;
-                        padding-bottom: 9px;
-                        margin-bottom: 10px;
-                        border-bottom: 1px solid var(--ctx-divider);
+                        padding-left: 14px;
+                        margin-left: 14px;
+                        border-left: 1px solid var(--ctx-divider);
                         display: flex;
                         flex-direction: column;
-                        gap: 5px;
+                        gap: 7px;
                         scrollbar-width: thin;
                     }
                     .breakdown[hidden] { display: none; }
+                    .bd-panel-title {
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: var(--ctx-fg);
+                        line-height: 1.25;
+                        margin-bottom: 2px;
+                    }
+                    @media (max-width: 620px) {
+                        .card { flex-direction: column; }
+                        .breakdown {
+                            width: auto;
+                            margin-left: 0;
+                            padding-left: 0;
+                            margin-top: 10px;
+                            padding-top: 10px;
+                            border-left: 0;
+                            border-top: 1px solid var(--ctx-divider);
+                        }
+                    }
                     .bd-bar {
                         display: flex;
                         align-items: stretch;
@@ -1911,100 +1941,105 @@
                     { class: 'card', id: 'ctx-card', role: 'dialog', 'aria-label': '上下文窗口详情', hidden: '' },
                     h(
                         'div',
-                        { class: 'breakdown', id: 'card-breakdown', hidden: '' },
-                        h('div', { class: 'bd-bar', id: 'bd-bar', hidden: '' }),
-                        h('div', { class: 'bd-list', id: 'bd-categories' }),
-                        h('div', { class: 'bd-empty', id: 'bd-note', hidden: '' }, '')
-                    ),
-                    h(
-                        'div',
-                        { class: 'card-head' },
+                        { class: 'card-main' },
                         h(
                             'div',
-                            { class: 'card-head-left' },
-                            h('span', { class: 'card-title' }, '上下文窗口'),
+                            { class: 'card-head' },
                             h(
-                                'button',
-                                {
-                                    type: 'button',
-                                    class: 'bd-toggle',
-                                    id: 'card-breakdown-toggle',
-                                    'aria-expanded': 'false',
-                                    'aria-label': '展开上下文分类构成',
-                                    title: '向上展开上下文分类构成',
-                                },
+                                'div',
+                                { class: 'card-head-left' },
+                                h('span', { class: 'card-title' }, '上下文窗口'),
+                                h(
+                                    'button',
+                                    {
+                                        type: 'button',
+                                        class: 'bd-toggle',
+                                        id: 'card-breakdown-toggle',
+                                        'aria-expanded': 'false',
+                                        'aria-label': '向右展开上下文分类构成',
+                                        title: '向右展开上下文分类构成',
+                                    },
+                                    h('span', { id: 'bd-toggle-text' }, '构成'),
+                                    svgEl(
+                                        'svg',
+                                        { class: 'bd-chevron', viewBox: '0 0 12 12', 'aria-hidden': 'true' },
+                                        svgEl('path', {
+                                            d: 'M4.5 2.5L8 6l-3.5 3.5',
+                                            fill: 'none',
+                                            stroke: 'currentColor',
+                                            'stroke-width': '1.5',
+                                            'stroke-linecap': 'round',
+                                            'stroke-linejoin': 'round',
+                                        })
+                                    )
+                                )
+                            ),
+                            h('span', { class: 'state-badge', id: 'card-badge' }, '待采样')
+                        ),
+                        h(
+                            'div',
+                            { class: 'card-body' },
+                            h(
+                                'div',
+                                { class: 'big-gauge-wrap' },
                                 svgEl(
                                     'svg',
-                                    { class: 'bd-chevron', viewBox: '0 0 12 12', 'aria-hidden': 'true' },
-                                    svgEl('path', {
-                                        d: 'M2.5 7.5L6 4l3.5 3.5',
-                                        fill: 'none',
-                                        stroke: 'currentColor',
-                                        'stroke-width': '1.5',
-                                        'stroke-linecap': 'round',
-                                        'stroke-linejoin': 'round',
+                                    { class: 'big-gauge', viewBox: '0 0 64 64', 'aria-hidden': 'true' },
+                                    svgEl('circle', {
+                                        class: 'big-track',
+                                        cx: '32',
+                                        cy: '32',
+                                        r: String(BIG_R),
+                                        'stroke-dasharray': `${BIG_ARC.toFixed(2)} ${BIG_C.toFixed(2)}`,
+                                        transform: 'rotate(135 32 32)',
+                                    }),
+                                    svgEl('circle', {
+                                        class: 'big-arc',
+                                        id: 'big-arc',
+                                        cx: '32',
+                                        cy: '32',
+                                        r: String(BIG_R),
+                                        'stroke-dasharray': `0 ${BIG_C.toFixed(2)}`,
+                                        transform: 'rotate(135 32 32)',
                                     })
                                 ),
-                                h('span', { id: 'bd-toggle-text' }, '构成')
-                            )
-                        ),
-                        h('span', { class: 'state-badge', id: 'card-badge' }, '待采样')
-                    ),
-                    h(
-                        'div',
-                        { class: 'card-body' },
-                        h(
-                            'div',
-                            { class: 'big-gauge-wrap' },
-                            svgEl(
-                                'svg',
-                                { class: 'big-gauge', viewBox: '0 0 64 64', 'aria-hidden': 'true' },
-                                svgEl('circle', {
-                                    class: 'big-track',
-                                    cx: '32',
-                                    cy: '32',
-                                    r: String(BIG_R),
-                                    'stroke-dasharray': `${BIG_ARC.toFixed(2)} ${BIG_C.toFixed(2)}`,
-                                    transform: 'rotate(135 32 32)',
-                                }),
-                                svgEl('circle', {
-                                    class: 'big-arc',
-                                    id: 'big-arc',
-                                    cx: '32',
-                                    cy: '32',
-                                    r: String(BIG_R),
-                                    'stroke-dasharray': `0 ${BIG_C.toFixed(2)}`,
-                                    transform: 'rotate(135 32 32)',
-                                })
+                                h(
+                                    'div',
+                                    { class: 'big-center' },
+                                    h('span', { class: 'big-pct', id: 'card-pct' }, '--'),
+                                    h('span', { class: 'big-sub' }, '已用')
+                                )
                             ),
                             h(
                                 'div',
-                                { class: 'big-center' },
-                                h('span', { class: 'big-pct', id: 'card-pct' }, '--'),
-                                h('span', { class: 'big-sub' }, '已用')
+                                { class: 'stats' },
+                                h('div', { class: 'stat-row' }, h('span', { class: 'stat-label' }, '已用 Token'), h('span', { class: 'stat-value', id: 'card-used' }, '—')),
+                                h('div', { class: 'stat-row' }, h('span', { class: 'stat-label' }, '剩余可用'), h('span', { class: 'stat-value', id: 'card-rem' }, '—')),
+                                h('div', { class: 'stat-row' }, h('span', { class: 'stat-label' }, '窗口上限'), h('span', { class: 'stat-value', id: 'card-max' }, '—'))
                             )
                         ),
                         h(
                             'div',
-                            { class: 'stats' },
-                            h('div', { class: 'stat-row' }, h('span', { class: 'stat-label' }, '已用 Token'), h('span', { class: 'stat-value', id: 'card-used' }, '—')),
-                            h('div', { class: 'stat-row' }, h('span', { class: 'stat-label' }, '剩余可用'), h('span', { class: 'stat-value', id: 'card-rem' }, '—')),
-                            h('div', { class: 'stat-row' }, h('span', { class: 'stat-label' }, '窗口上限'), h('span', { class: 'stat-value', id: 'card-max' }, '—'))
+                            { class: 'card-foot' },
+                            h('div', { class: 'foot-row' }, h('span', { class: 'stat-label' }, '采样模型'), h('span', { class: 'stat-value', id: 'card-model', title: '' }, '—')),
+                            h('div', { class: 'foot-row' }, h('span', { class: 'stat-label' }, '生成速率'), h('span', { class: 'stat-value', id: 'card-tps', title: '' }, '—')),
+                            h('div', { class: 'foot-row' }, h('span', { class: 'stat-label' }, '本次缓存'), h('span', { class: 'stat-value', id: 'card-cache-last', title: '' }, '—')),
+                            h('div', { class: 'foot-row' }, h('span', { class: 'stat-label' }, '累计缓存'), h('span', { class: 'stat-value', id: 'card-cache-total', title: '' }, '—'))
+                        ),
+                        h(
+                            'div',
+                            { class: 'quota-section', id: 'card-quota-section', hidden: '' },
+                            h('div', { class: 'quota-section-title' }, '模型额度'),
+                            h('div', { class: 'quota-groups', id: 'card-quota-groups' })
                         )
                     ),
                     h(
                         'div',
-                        { class: 'card-foot' },
-                        h('div', { class: 'foot-row' }, h('span', { class: 'stat-label' }, '采样模型'), h('span', { class: 'stat-value', id: 'card-model', title: '' }, '—')),
-                        h('div', { class: 'foot-row' }, h('span', { class: 'stat-label' }, '生成速率'), h('span', { class: 'stat-value', id: 'card-tps', title: '' }, '—')),
-                        h('div', { class: 'foot-row' }, h('span', { class: 'stat-label' }, '本次缓存'), h('span', { class: 'stat-value', id: 'card-cache-last', title: '' }, '—')),
-                        h('div', { class: 'foot-row' }, h('span', { class: 'stat-label' }, '累计缓存'), h('span', { class: 'stat-value', id: 'card-cache-total', title: '' }, '—'))
-                    ),
-                    h(
-                        'div',
-                        { class: 'quota-section', id: 'card-quota-section', hidden: '' },
-                        h('div', { class: 'quota-section-title' }, '模型额度'),
-                        h('div', { class: 'quota-groups', id: 'card-quota-groups' })
+                        { class: 'breakdown', id: 'card-breakdown', hidden: '' },
+                        h('div', { class: 'bd-panel-title' }, '上下文构成'),
+                        h('div', { class: 'bd-bar', id: 'bd-bar', hidden: '' }),
+                        h('div', { class: 'bd-list', id: 'bd-categories' }),
+                        h('div', { class: 'bd-empty', id: 'bd-note', hidden: '' }, '')
                     )
                 );
 
@@ -2363,9 +2398,10 @@
                 return;
             }
             const tr = anchor.el.getBoundingClientRect();
-            const cw = card.offsetWidth || 292;
+            const cw = card.offsetWidth || 318;
             const ch = card.offsetHeight || 205;
-            const idealLeft = tr.left + (tr.width - cw) / 2;
+            const anchorW = Math.min(cw, 318);
+            const idealLeft = tr.left + (tr.width - anchorW) / 2;
             const left = Math.min(Math.max(8, idealLeft), Math.max(8, window.innerWidth - cw - 8));
             let top = tr.top - ch - 8;
             if (top < 8) {
