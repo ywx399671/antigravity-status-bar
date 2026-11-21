@@ -617,10 +617,14 @@
 
     function formatBucketWindowLabel(bucket) {
         const win = cleanModelText(bucket && bucket.window).toLowerCase();
-        if (win === 'daily') return 'Daily limit';
-        if (win === 'weekly') return 'Weekly limit';
-        if (/^\d+[smhd]$/.test(win)) return `${win} limit`;
-        return cleanModelText(bucket && bucket.displayName) || 'Quota limit';
+        if (win === 'daily') return '每日额度';
+        if (win === 'weekly') return '每周额度';
+        const m = win.match(/^(\d+)([smhd])$/);
+        if (m) {
+            const unitMap = { s: '秒', m: '分钟', h: '小时', d: '天' };
+            return `${m[1]}${unitMap[m[2]] || m[2]}额度`;
+        }
+        return cleanModelText(bucket && bucket.displayName) || '模型额度';
     }
 
     async function getQuotaSummary(endpoint, force = false) {
@@ -1546,7 +1550,7 @@
                         pointer-events: auto;
                         position: fixed;
                         z-index: 2147483647;
-                        width: 306px;
+                        width: 318px;
                         max-width: calc(100vw - 16px);
                         max-height: calc(100vh - 20px);
                         overflow-y: auto;
@@ -1812,17 +1816,17 @@
                     }
                     .quota-groups {
                         display: grid;
-                        gap: 11px;
+                        gap: 9px;
                     }
                     .quota-group {
                         display: grid;
-                        gap: 6px;
+                        gap: 5px;
                     }
                     .quota-group-head {
                         display: flex;
                         align-items: center;
                         gap: 6px;
-                        font-size: 12.5px;
+                        font-size: 12px;
                         font-weight: 600;
                         color: var(--ctx-fg);
                         line-height: 1.25;
@@ -1838,24 +1842,32 @@
                         display: flex;
                         align-items: center;
                         justify-content: space-between;
-                        gap: 10px;
+                        gap: 8px;
                     }
                     .quota-bucket-left {
-                        display: grid;
-                        gap: 2px;
+                        display: inline-flex;
+                        align-items: baseline;
+                        gap: 4px;
                         min-width: 0;
+                        flex: 1;
+                        overflow: hidden;
+                        white-space: nowrap;
                     }
                     .quota-bucket-label {
                         font-size: 11.5px;
                         color: var(--ctx-muted);
                         line-height: 1.25;
+                        flex: none;
                     }
                     .quota-bucket-reset {
-                        font-size: 11px;
+                        font-size: 10.5px;
                         color: var(--ctx-muted);
-                        opacity: 0.84;
+                        opacity: 0.78;
                         line-height: 1.2;
                         font-variant-numeric: tabular-nums;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        white-space: nowrap;
                     }
                     .quota-bucket-right {
                         display: inline-flex;
@@ -1991,7 +2003,7 @@
                     h(
                         'div',
                         { class: 'quota-section', id: 'card-quota-section', hidden: '' },
-                        h('div', { class: 'quota-section-title' }, 'Usage'),
+                        h('div', { class: 'quota-section-title' }, '模型额度'),
                         h('div', { class: 'quota-groups', id: 'card-quota-groups' })
                     )
                 );
@@ -2531,14 +2543,14 @@
             const ts = Date.parse(resetTime);
             if (!Number.isFinite(ts)) return '';
             const diffMs = ts - Date.now();
-            if (diffMs <= 0) return 'Resets in <1m';
+            if (diffMs <= 0) return '不足1分后重置';
             const totalMins = Math.floor(diffMs / 60000);
             const days = Math.floor(totalMins / 1440);
             const hours = Math.floor((totalMins % 1440) / 60);
             const mins = totalMins % 60;
-            if (days > 0) return hours > 0 ? `Resets in ${days}d ${hours}h` : `Resets in ${days}d`;
-            if (hours > 0) return mins > 0 ? `Resets in ${hours}h ${mins}m` : `Resets in ${hours}h`;
-            return mins > 0 ? `Resets in ${mins}m` : 'Resets in <1m';
+            if (days > 0) return hours > 0 ? `${days}天${hours}时后重置` : `${days}天后重置`;
+            if (hours > 0) return mins > 0 ? `${hours}时${mins}分后重置` : `${hours}小时后重置`;
+            return mins > 0 ? `${mins}分后重置` : '不足1分后重置';
         }
 
         function readDomSelectedModelText(inst) {
@@ -2647,8 +2659,8 @@
                         })
                     );
 
-                    const leftChildren = [h('span', { class: 'quota-bucket-label' }, b.windowLabel || 'Limit')];
-                    if (resetText) leftChildren.push(h('span', { class: 'quota-bucket-reset' }, resetText));
+                    const leftChildren = [h('span', { class: 'quota-bucket-label' }, b.windowLabel || '模型额度')];
+                    if (resetText) leftChildren.push(h('span', { class: 'quota-bucket-reset' }, `· ${resetText}`));
 
                     bucketNodes.push(
                         h(
@@ -2658,7 +2670,7 @@
                             h(
                                 'div',
                                 { class: 'quota-bucket-right' },
-                                h('span', { class: 'quota-bucket-pct', 'data-qlevel': qLevel }, `${remPctInt}% left`),
+                                h('span', { class: 'quota-bucket-pct', 'data-qlevel': qLevel }, `剩余 ${remPctInt}%`),
                                 ringSvg
                             )
                         )
