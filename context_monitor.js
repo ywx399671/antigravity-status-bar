@@ -2280,6 +2280,7 @@
                 isFetching: false,
                 fetchEpoch: 0,
                 resizeObserver: null,
+                modelObserver: null,
             };
 
             bindCardTrigger(inst, trigger, 'ring');
@@ -2428,6 +2429,22 @@
 
         function observeToolbar(inst, comp) {
             if (inst.resizeObserver) inst.resizeObserver.disconnect();
+            if (inst.modelObserver) inst.modelObserver.disconnect();
+            if (comp.leftGroup && typeof MutationObserver === 'function') {
+                inst.modelObserver = new MutationObserver(() => {
+                    const nextDomModel = readDomSelectedModelText(inst);
+                    if (nextDomModel !== inst.lastDomModel) {
+                        inst.lastDomModel = nextDomModel;
+                        renderInstance(inst);
+                        void refreshInstance(inst, false);
+                    }
+                });
+                inst.modelObserver.observe(comp.leftGroup, {
+                    childList: true,
+                    subtree: true,
+                    characterData: true,
+                });
+            }
             if (typeof ResizeObserver !== 'function') return;
             inst.resizeObserver = new ResizeObserver(() => {
                 fitInstanceLayout(inst);
@@ -2890,6 +2907,7 @@
             for (const [box, inst] of instances.entries()) {
                 if (seen.has(box)) continue;
                 if (inst.resizeObserver) inst.resizeObserver.disconnect();
+                if (inst.modelObserver) inst.modelObserver.disconnect();
                 if (inst.host.isConnected) inst.host.remove();
                 if (inst.speedHost && inst.speedHost.isConnected) inst.speedHost.remove();
                 instances.delete(box);
@@ -2958,7 +2976,6 @@
         domObserver.observe(document.documentElement, {
             childList: true,
             subtree: true,
-            characterData: true,
             attributes: true,
             attributeFilter: ['class', 'style', 'hidden', 'inert', 'data-cascade-id', 'data-testid'],
         });
