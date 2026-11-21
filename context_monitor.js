@@ -489,9 +489,9 @@
         return null;
     }
 
-    const MODEL_CATALOG_TTL_MS = 45 * 1000;
-    const QUOTA_SUMMARY_TTL_MS = 10 * 1000;
-    const QUOTA_FORCE_COOLDOWN_MS = 3 * 1000;
+    const MODEL_CATALOG_TTL_MS = 5 * 60 * 1000;
+    const QUOTA_SUMMARY_TTL_MS = 60 * 1000;
+    const QUOTA_FORCE_COOLDOWN_MS = 5 * 1000;
     const CONTROL_CHARS_RE = /[\x00-\x1f\x7f\u202a-\u202e\u2066-\u2069]/g;
     const EFFORT_SUFFIX_RE = /^(.+?)[-_ ](thinking|xhigh|high|medium|low)$/i;
     const UPPER_ACRONYMS = new Map([
@@ -634,7 +634,7 @@
             quotaSummaryCache = { endpointKey: endpoint.key, groups: [], fetchedAt: 0, pending: null };
         }
         const age = Date.now() - quotaSummaryCache.fetchedAt;
-        const ttl = quotaSummaryCache.groups.length > 0 ? QUOTA_SUMMARY_TTL_MS : 5000;
+        const ttl = quotaSummaryCache.groups.length > 0 ? QUOTA_SUMMARY_TTL_MS : 10000;
         if (quotaSummaryCache.fetchedAt > 0) {
             if (!force && age < ttl) return quotaSummaryCache.groups;
             if (force && age < QUOTA_FORCE_COOLDOWN_MS && quotaSummaryCache.groups.length > 0) {
@@ -643,8 +643,8 @@
         }
         if (quotaSummaryCache.pending) return quotaSummaryCache.pending;
 
-        const forceCloud = Boolean(force || age >= QUOTA_SUMMARY_TTL_MS);
-        quotaSummaryCache.pending = callLsRpc(endpoint, 'RetrieveUserQuotaSummary', { forceRefresh: forceCloud })
+        // 仅在显式事件触发（如本轮生成结束、主动打开浮卡）时才向云端请求 forceRefresh
+        quotaSummaryCache.pending = callLsRpc(endpoint, 'RetrieveUserQuotaSummary', { forceRefresh: Boolean(force) })
             .then((res) => {
                 const rawGroups = (res && res.response && Array.isArray(res.response.groups))
                     ? res.response.groups
@@ -1150,7 +1150,7 @@
                 }
                 const [catalogState, quotaGroups] = await Promise.all([
                     getModelCatalog(endpoint, false),
-                    getQuotaSummary(endpoint, true),
+                    getQuotaSummary(endpoint, false),
                 ]);
                 const freshQuota = buildQuotaPayload(catalogState.quotaEntries, quotaGroups, cached.lastChat, cached.payload && cached.payload.context && cached.payload.context.model);
                 cached.payload = { ...cached.payload, quota: freshQuota };
@@ -1159,8 +1159,7 @@
         }
 
         const justSettled = Boolean(cached && !cached.settled && settled);
-        const hasNewSteps = Boolean(cached && stepCount !== null && cached.stepCount !== null && stepCount > cached.stepCount);
-        const shouldForceQuota = Boolean(force || justSettled || hasNewSteps);
+        const shouldForceQuota = Boolean(force || justSettled);
 
         const canIncremental = Boolean(
             cached &&
@@ -2328,7 +2327,7 @@
                     hoverOpen = true;
                     renderPortalCard(inst);
                     updateCardVisibility();
-                    if (Date.now() - inst.lastFetchAt >= 3000) {
+                    if (Date.now() - inst.lastFetchAt >= 5000) {
                         void refreshInstance(inst, true);
                     }
                 }, 220);
@@ -2349,7 +2348,7 @@
                     activeAnchor = anchorName;
                     pinnedOpen = true;
                     renderPortalCard(inst);
-                    if (Date.now() - inst.lastFetchAt >= 3000) {
+                    if (Date.now() - inst.lastFetchAt >= 5000) {
                         void refreshInstance(inst, true);
                     }
                 }
@@ -2926,7 +2925,7 @@
                 } else if (nextDomModel !== inst.lastDomModel) {
                     inst.lastDomModel = nextDomModel;
                     renderInstance(inst);
-                    void refreshInstance(inst, true);
+                    void refreshInstance(inst, false);
                 } else if (moved || (comp.toolbar && comp.toolbar.clientWidth !== inst.lastToolbarWidth)) {
                     fitInstanceLayout(inst);
                 }
@@ -2982,8 +2981,8 @@
             if (document.hidden) return;
             const now = Date.now();
             for (const inst of instances.values()) {
-                if (now - inst.lastFetchAt >= 5000) {
-                    void refreshInstance(inst, true);
+                if (now - inst.lastFetchAt >= 15000) {
+                    void refreshInstance(inst, false);
                 }
             }
         };
