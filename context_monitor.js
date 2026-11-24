@@ -24,7 +24,7 @@
     const sessionCache = new Map();
     const inflightRequests = new Map();
     let summariesCache = { endpointKey: '', pending: null };
-    let modelCatalogCache = { endpointKey: '', map: new Map(), quotaEntries: [], fetchedAt: 0, pending: null };
+    let modelCatalogCache = { endpointKey: '', map: new Map(), labels: [], quotaEntries: [], fetchedAt: 0, pending: null };
     let quotaSummaryCache = { endpointKey: '', groups: [], fetchedAt: 0, pending: null };
 
     // -------------------------------------------------------------------------
@@ -543,7 +543,7 @@
     /** 从官方 Language Server GetUserStatus 动态获取客户端当前可用模型显示名称映射与额度信息 */
     async function getModelCatalog(endpoint, force = false) {
         if (modelCatalogCache.endpointKey !== endpoint.key) {
-            modelCatalogCache = { endpointKey: endpoint.key, map: new Map(), quotaEntries: [], fetchedAt: 0, pending: null };
+            modelCatalogCache = { endpointKey: endpoint.key, map: new Map(), labels: [], quotaEntries: [], fetchedAt: 0, pending: null };
         }
         const age = Date.now() - modelCatalogCache.fetchedAt;
         const ttl = modelCatalogCache.map.size > 0 ? MODEL_CATALOG_TTL_MS : 15000;
@@ -558,12 +558,18 @@
                     || (res && res.cascadeModelConfigData && res.cascadeModelConfigData.clientModelConfigs)
                     || [];
                 const nextMap = new Map();
+                const nextLabels = [];
+                const seenLabels = new Set();
                 const nextQuotas = [];
                 if (Array.isArray(configs)) {
                     for (const cfg of configs) {
                         if (!cfg || typeof cfg !== 'object') continue;
                         const label = cleanModelText(cfg.label);
                         if (!label) continue;
+                        if (!seenLabels.has(label)) {
+                            seenLabels.add(label);
+                            nextLabels.push(label);
+                        }
                         const refs = [
                             cfg.modelOrAlias && cfg.modelOrAlias.model,
                             cfg.modelOrAlias && cfg.modelOrAlias.alias,
@@ -595,6 +601,7 @@
                     }
                 }
                 modelCatalogCache.map = nextMap;
+                modelCatalogCache.labels = nextLabels;
                 modelCatalogCache.quotaEntries = nextQuotas;
                 modelCatalogCache.fetchedAt = Date.now();
                 return modelCatalogCache;
@@ -709,10 +716,11 @@
         return null;
     }
 
-    function buildQuotaPayload(quotaEntries, quotaGroups, latestChat, contextModel) {
+    function buildQuotaPayload(quotaEntries, quotaGroups, latestChat, contextModel, catalogLabels) {
         const hasGroups = Array.isArray(quotaGroups) && quotaGroups.length > 0;
         const hasEntries = Array.isArray(quotaEntries) && quotaEntries.length > 0;
-        if (!hasGroups && !hasEntries) return null;
+        const hasLabels = Array.isArray(catalogLabels) && catalogLabels.length > 0;
+        if (!hasGroups && !hasEntries && !hasLabels) return null;
 
         let current = null;
         const rawCandidates = [];
@@ -784,6 +792,7 @@
                     resetTime: e.resetTime,
                 }))
                 : [],
+            catalogLabels: hasLabels ? catalogLabels.slice() : [],
         };
     }
 
@@ -942,13 +951,42 @@
         };
     }
 
+    /** 提取单次模型请求的真实上下文占用（真实输入总量 + 留存可见输出，剔除临时思考 token） */
+    function readActualContextUsage(usage) {
+        if (!usage || typeof usage !== 'object') return null;
+        const hasInput = usage.inputTokens !== undefined;
+        const hasRead = usage.cacheReadTokens !== undefined;
+        const hasWrite = usage.cacheWriteTokens !== undefined;
+        if (!hasInput && !hasRead && !hasWrite) return null;
+        const input = hasInput ? parseNonNegInt(usage.inputTokens) : 0;
+        const read = hasRead ? parseNonNegInt(usage.cacheReadTokens) : 0;
+        const write = hasWrite ? parseNonNegInt(usage.cacheWriteTokens) : 0;
+        if (input === null || read === null || write === null) return null;
+        const totalInput = input + read + write;
+        if (!Number.isSafeInteger(totalInput) || totalInput <= 0) return null;
+        const provider = String(usage.apiProvider || '');
+        if (!/GOOGLE_GEMINI|OPENAI|ANTHROPIC/i.test(provider)) return null;
+
+        const totalOut = parseNonNegInt(usage.outputTokens);
+        const visibleOut = parseNonNegInt(usage.responseOutputTokens);
+        const thinkOut = parseNonNegInt(usage.thinkingOutputTokens);
+        const retainedOut = visibleOut !== null
+            ? visibleOut
+            : (totalOut !== null && thinkOut !== null ? Math.max(0, totalOut - thinkOut) : (totalOut ?? 0));
+        const total = totalInput + retainedOut;
+        if (!Number.isSafeInteger(total) || total <= 0) return null;
+        return { input, read, write, totalInput, retainedOut, total };
+    }
+
     function buildContextMetrics(chatModel, modelCatalog) {
         if (!chatModel || typeof chatModel !== 'object') return null;
         const startMeta = chatModel.chatStartMetadata;
         const ctxMeta = startMeta && startMeta.contextWindowMetadata;
         if (!ctxMeta || typeof ctxMeta !== 'object') return null;
-        const usedTokens = parseNonNegInt(ctxMeta.estimatedTokensUsed);
-        if (usedTokens === null) return null;
+        const estimatedTokens = parseNonNegInt(ctxMeta.estimatedTokensUsed);
+        const actual = readActualContextUsage(chatModel.usage);
+        if (!actual && estimatedTokens === null) return null;
+        const usedTokens = actual ? actual.total : estimatedTokens;
         const rawMax = parseNonNegInt(ctxMeta.maxContextTokens);
         const maxTokens = rawMax !== null && rawMax > 0 ? rawMax : null;
         return {
@@ -958,6 +996,10 @@
             usedFraction: maxTokens === null ? null : usedTokens / maxTokens,
             remainingFraction: maxTokens === null ? null : Math.max(0, 1 - usedTokens / maxTokens),
             model: resolveModelDisplayName(chatModel, modelCatalog),
+            source: actual ? 'actual' : 'estimated',
+            estimatedTokens,
+            actualInputTokens: actual ? actual.totalInput : null,
+            actualOutputTokens: actual ? actual.retainedOut : null,
         };
     }
 
@@ -1061,18 +1103,21 @@
         }
 
         const categories = [];
+        const breakdownRefUsed = context.source === 'actual' && typeof context.estimatedTokens === 'number'
+            ? context.estimatedTokens
+            : context.usedTokens;
         if (grouped.size > 0) {
             for (const g of grouped.values()) {
                 if (g.tokens > 0) categories.push(g);
             }
             const totalPlaced = categories.reduce((s, c) => s + c.tokens, 0);
-            if (context.usedTokens - totalPlaced > 64) {
+            if (breakdownRefUsed - totalPlaced > 64) {
                 categories.push({
                     key: 'residual',
                     label: '其余会话上下文',
                     color: '#94a3b8',
                     order: 89,
-                    tokens: context.usedTokens - totalPlaced,
+                    tokens: breakdownRefUsed - totalPlaced,
                     isFree: false,
                 });
             }
@@ -1102,6 +1147,10 @@
         return {
             basis,
             denomTokens: denom,
+            source: context.source || 'estimated',
+            actualTotal: context.usedTokens,
+            estimatedTotal: typeof context.estimatedTokens === 'number' ? context.estimatedTokens : null,
+            hasEstimatedGroups: grouped.size > 0,
             categories: categories.map((r) => ({
                 ...r,
                 fraction: denom > 0 ? r.tokens / denom : null,
@@ -1117,7 +1166,7 @@
                 getModelCatalog(endpoint, Boolean(force)),
                 getQuotaSummary(endpoint, Boolean(force)),
             ]);
-            const quota = buildQuotaPayload(catalogState.quotaEntries, quotaGroups, null, null);
+            const quota = buildQuotaPayload(catalogState.quotaEntries, quotaGroups, null, null, catalogState.labels);
             return { status: 'new', running: false, conversationId: null, context: null, cache: null, speed: null, breakdown: null, quota };
         }
         const id = rawId.toLowerCase();
@@ -1128,7 +1177,7 @@
                 getModelCatalog(endpoint, Boolean(force)),
                 getQuotaSummary(endpoint, Boolean(force)),
             ]);
-            const quota = buildQuotaPayload(catalogState.quotaEntries, quotaGroups, null, null);
+            const quota = buildQuotaPayload(catalogState.quotaEntries, quotaGroups, null, null, catalogState.labels);
             return { status: 'new', running: false, conversationId: id, context: null, cache: null, speed: null, breakdown: null, quota };
         }
 
@@ -1152,7 +1201,7 @@
                     getModelCatalog(endpoint, false),
                     getQuotaSummary(endpoint, false),
                 ]);
-                const freshQuota = buildQuotaPayload(catalogState.quotaEntries, quotaGroups, cached.lastChat, cached.payload && cached.payload.context && cached.payload.context.model);
+                const freshQuota = buildQuotaPayload(catalogState.quotaEntries, quotaGroups, cached.lastChat, cached.payload && cached.payload.context && cached.payload.context.model, catalogState.labels);
                 cached.payload = { ...cached.payload, quota: freshQuota };
                 return cached.payload;
             }
@@ -1197,7 +1246,7 @@
         const cache = aggregateCacheSlots(scan.cacheSlots);
         const speed = aggregateSpeedSlots(scan.speedSlots);
         const breakdown = buildContextBreakdown(context, scan.latestChat);
-        const quota = buildQuotaPayload(catalogState.quotaEntries, quotaGroups, scan.latestChat, context && context.model);
+        const quota = buildQuotaPayload(catalogState.quotaEntries, quotaGroups, scan.latestChat, context && context.model, catalogState.labels);
         const payload = {
             status: context ? 'ready' : 'waiting',
             running,
@@ -2030,7 +2079,7 @@
                         h(
                             'div',
                             { class: 'card-foot' },
-                            h('div', { class: 'foot-row' }, h('span', { class: 'stat-label' }, '采样模型'), h('span', { class: 'stat-value', id: 'card-model', title: '' }, '—')),
+                            h('div', { class: 'foot-row' }, h('span', { class: 'stat-label', id: 'card-model-label' }, '当前模型'), h('span', { class: 'stat-value', id: 'card-model', title: '' }, '—')),
                             h('div', { class: 'foot-row' }, h('span', { class: 'stat-label' }, '生成速率'), h('span', { class: 'stat-value', id: 'card-tps', title: '' }, '—')),
                             h('div', { class: 'foot-row' }, h('span', { class: 'stat-label' }, '本次缓存'), h('span', { class: 'stat-value', id: 'card-cache-last', title: '' }, '—')),
                             h('div', { class: 'foot-row' }, h('span', { class: 'stat-label' }, '累计缓存'), h('span', { class: 'stat-value', id: 'card-cache-total', title: '' }, '—'))
@@ -2430,8 +2479,12 @@
         function observeToolbar(inst, comp) {
             if (inst.resizeObserver) inst.resizeObserver.disconnect();
             if (inst.modelObserver) inst.modelObserver.disconnect();
-            if (comp.leftGroup && typeof MutationObserver === 'function') {
-                inst.modelObserver = new MutationObserver(() => {
+            const modelScope = (comp.box && comp.box.isConnected)
+                ? comp.box
+                : ((comp.toolbar && comp.toolbar.isConnected) ? comp.toolbar : comp.leftGroup);
+            if (modelScope && typeof MutationObserver === 'function') {
+                inst.modelObserver = new MutationObserver((records) => {
+                    if (!records.some((r) => !isOwnUiTarget(r.target))) return;
                     const nextDomModel = readDomSelectedModelText(inst);
                     if (nextDomModel !== inst.lastDomModel) {
                         inst.lastDomModel = nextDomModel;
@@ -2439,10 +2492,12 @@
                         void refreshInstance(inst, false);
                     }
                 });
-                inst.modelObserver.observe(comp.leftGroup, {
+                inst.modelObserver.observe(modelScope, {
                     childList: true,
                     subtree: true,
                     characterData: true,
+                    attributes: true,
+                    attributeFilter: ['aria-label', 'title', 'data-value'],
                 });
             }
             if (typeof ResizeObserver !== 'function') return;
@@ -2592,6 +2647,15 @@
                 } else if (categories.length === 0) {
                     noteEl.hidden = false;
                     noteEl.textContent = '暂无可拆分的构成数据';
+                } else if (
+                    bd.source === 'actual' &&
+                    bd.hasEstimatedGroups &&
+                    typeof bd.estimatedTotal === 'number' &&
+                    typeof bd.actualTotal === 'number' &&
+                    Math.abs(bd.estimatedTotal - bd.actualTotal) > 64
+                ) {
+                    noteEl.hidden = false;
+                    noteEl.textContent = `分项按请求前本地预估拆分（合 ${formatCompactTokens(bd.estimatedTotal)}），主面板已按实测校准（${formatCompactTokens(bd.actualTotal)}）`;
                 } else {
                     noteEl.hidden = true;
                     noteEl.textContent = '';
@@ -2621,39 +2685,156 @@
             return mins > 0 ? `${mins}分后重置` : '不足1分后重置';
         }
 
+        function cleanDomModelButtonText(raw) {
+            if (!raw || typeof raw !== 'string') return '';
+            return raw
+                .replace(/[\u200b-\u200d\ufeff▾▴▼▲⌄⌃∨∧]+/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+        }
+
+        function normalizeClientModelKey(raw) {
+            return cleanDomModelButtonText(raw)
+                .toLowerCase()
+                .replace(/[()（）\-_]+/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+        }
+
+        function formatDomModelFallback(rawText) {
+            const cleaned = cleanDomModelButtonText(rawText);
+            if (!cleaned) return '';
+            if (/\([^)]+\)\s*$/.test(cleaned)) return cleaned;
+            const m = cleaned.match(/^(.+?)\s+(Low|Medium|High|XHigh|Extra\s+High|Thinking)$/i);
+            if (m) {
+                const rawTag = m[2].replace(/\s+/g, ' ').trim();
+                const lowTag = rawTag.toLowerCase();
+                const tag = lowTag === 'xhigh'
+                    ? 'XHigh'
+                    : (lowTag === 'extra high'
+                        ? 'Extra High'
+                        : rawTag[0].toUpperCase() + rawTag.slice(1).toLowerCase());
+                return `${m[1].trim()} (${tag})`;
+            }
+            return cleaned;
+        }
+
+        function resolveCanonicalDomModel(rawDomModel, ctxModel, quota) {
+            const cleaned = cleanDomModelButtonText(rawDomModel);
+            if (!cleaned) return '';
+            const key = normalizeClientModelKey(cleaned);
+            if (!key) return '';
+            if (ctxModel && normalizeClientModelKey(ctxModel) === key) {
+                return ctxModel;
+            }
+            const catalogLabels = quota && Array.isArray(quota.catalogLabels) ? quota.catalogLabels : [];
+            for (const lbl of catalogLabels) {
+                if (lbl && normalizeClientModelKey(lbl) === key) return lbl;
+            }
+            const models = quota && Array.isArray(quota.models) ? quota.models : [];
+            for (const m of models) {
+                if (m && m.label && normalizeClientModelKey(m.label) === key) return m.label;
+            }
+            return formatDomModelFallback(cleaned);
+        }
+
         function readDomSelectedModelText(inst) {
-            const lg = inst && inst.comp && inst.comp.leftGroup;
-            if (!lg || !lg.isConnected) return '';
-            const trigger = lg.querySelector('[data-testid="model-selector-trigger"]');
-            if (trigger && trigger.textContent) return trigger.textContent.replace(/\s+/g, ' ').trim();
-            const btns = Array.from(lg.querySelectorAll('button'));
-            for (const b of btns) {
-                const txt = (b.textContent || '').replace(/\s+/g, ' ').trim();
-                if (/gemini|claude|gpt|orchestrator/i.test(txt)) return txt;
+            const comp = inst && inst.comp;
+            if (!comp) return '';
+            const roots = [];
+            for (const cand of [comp.leftGroup, comp.toolbar, comp.box]) {
+                if (cand && cand.isConnected && !roots.includes(cand)) roots.push(cand);
+            }
+            if (!roots.length) return '';
+
+            const isOwnOrEditor = (el) => {
+                if (!el) return true;
+                if (inst.host && (el === inst.host || inst.host.contains(el))) return true;
+                if (inst.speedHost && (el === inst.speedHost || inst.speedHost.contains(el))) return true;
+                if (typeof el.closest === 'function' && el.closest('[contenteditable="true"],[role="textbox"],textarea,input')) return true;
+                return false;
+            };
+
+            for (const root of roots) {
+                const trigger = root.querySelector('[data-testid="model-selector-trigger"]');
+                if (trigger && !isOwnOrEditor(trigger)) {
+                    const txt = cleanDomModelButtonText(trigger.textContent || '');
+                    if (txt) return txt;
+                }
+            }
+            for (const root of roots) {
+                const btns = Array.from(root.querySelectorAll('button'));
+                for (const b of btns) {
+                    if (isOwnOrEditor(b)) continue;
+                    const txt = cleanDomModelButtonText(b.textContent || '');
+                    if (!txt || txt.length > 64) continue;
+                    if (/gemini|claude|sonnet|opus|haiku|gpt|openai|argon|neon|carbon|hydrogen|flash|orchestrator/i.test(txt)) {
+                        return txt;
+                    }
+                }
             }
             return '';
+        }
+
+        function matchClientQuotaGroup(groups, modelText) {
+            if (!Array.isArray(groups) || !groups.length || !modelText) return null;
+            const stripped = cleanDomModelButtonText(modelText)
+                .replace(/\s*\((?:Low|Medium|High|XHigh|Extra\s+High|Thinking)\)\s*$/i, '')
+                .replace(/\s+(?:Low|Medium|High|XHigh|Extra\s+High|Thinking)\s*$/i, '')
+                .trim()
+                .toLowerCase();
+            if (!stripped) return null;
+            for (const g of groups) {
+                const dn = (g.displayName || '').toLowerCase();
+                const desc = (g.description || '').toLowerCase();
+                if (dn && (stripped.includes(dn) || dn.includes(stripped))) return g;
+                if (desc && desc.includes(stripped)) return g;
+            }
+            if (/argon/i.test(stripped)) {
+                return groups.find((g) => /argon/i.test(g.displayName)) || groups.find((g) => /gemini/i.test(g.displayName)) || null;
+            }
+            if (/claude|sonnet|opus|haiku|gpt|openai|oss/i.test(stripped)) {
+                return groups.find((g) => /claude|gpt/i.test(g.displayName)) || null;
+            }
+            if (/gemini|carbon|neon|hydrogen|flash|orchestrator/i.test(stripped)) {
+                return groups.find((g) => /gemini models/i.test(g.displayName)) || groups.find((g) => /gemini/i.test(g.displayName)) || null;
+            }
+            return null;
         }
 
         function resolveActiveQuotaSummary(inst, quota) {
             if (!quota) return null;
             const domModel = readDomSelectedModelText(inst);
             const groups = Array.isArray(quota.groups) ? quota.groups : [];
-            if (domModel && groups.length > 0) {
-                const low = domModel.toLowerCase();
-                let grp = null;
-                if (/argon/i.test(low)) grp = groups.find((g) => /argon/i.test(g.displayName));
-                else if (/claude|gpt|openai/i.test(low)) grp = groups.find((g) => /claude|gpt/i.test(g.displayName));
-                else if (/gemini|orchestrator/i.test(low)) grp = groups.find((g) => /gemini models/i.test(g.displayName)) || groups.find((g) => /gemini/i.test(g.displayName));
-                if (grp && Array.isArray(grp.buckets) && grp.buckets.length > 0) {
-                    const b = grp.buckets.reduce((m, cur) => (cur.remainingFraction < m.remainingFraction ? cur : m), grp.buckets[0]);
-                    return {
-                        label: domModel,
-                        groupName: grp.displayName,
-                        windowLabel: b.windowLabel,
-                        remainingFraction: b.remainingFraction,
-                        usedFraction: b.usedFraction,
-                        resetTime: b.resetTime,
-                    };
+            if (domModel) {
+                if (groups.length > 0) {
+                    const grp = matchClientQuotaGroup(groups, domModel);
+                    if (grp && Array.isArray(grp.buckets) && grp.buckets.length > 0) {
+                        const b = grp.buckets.reduce((m, cur) => (cur.remainingFraction < m.remainingFraction ? cur : m), grp.buckets[0]);
+                        return {
+                            label: resolveCanonicalDomModel(domModel, null, quota) || domModel,
+                            groupName: grp.displayName,
+                            windowLabel: b.windowLabel,
+                            remainingFraction: b.remainingFraction,
+                            usedFraction: b.usedFraction,
+                            resetTime: b.resetTime,
+                        };
+                    }
+                }
+                const models = Array.isArray(quota.models) ? quota.models : [];
+                const domKey = normalizeClientModelKey(domModel);
+                if (domKey && models.length > 0) {
+                    const matchedEntry = models.find((m) => m && m.label && normalizeClientModelKey(m.label) === domKey);
+                    if (matchedEntry && typeof matchedEntry.remainingFraction === 'number') {
+                        return {
+                            label: matchedEntry.label,
+                            groupName: matchedEntry.label.replace(/\s*\([^)]+\)\s*$/, '').trim(),
+                            windowLabel: 'Limit',
+                            remainingFraction: matchedEntry.remainingFraction,
+                            usedFraction: matchedEntry.usedFraction,
+                            resetTime: matchedEntry.resetTime,
+                        };
+                    }
                 }
             }
             if (quota.current && typeof quota.current.remainingFraction === 'number') {
@@ -2779,20 +2960,40 @@
             const usedEl = cardRoot.getElementById('card-used');
             const remEl = cardRoot.getElementById('card-rem');
             const maxEl = cardRoot.getElementById('card-max');
+            const modelLabelEl = cardRoot.getElementById('card-model-label');
             const modelEl = cardRoot.getElementById('card-model');
             const tpsEl = cardRoot.getElementById('card-tps');
             const cacheLastEl = cardRoot.getElementById('card-cache-last');
             const cacheTotalEl = cardRoot.getElementById('card-cache-total');
 
+            const rawDomModel = readDomSelectedModelText(inst);
+            inst.lastDomModel = rawDomModel;
+            const selectedModel = resolveCanonicalDomModel(rawDomModel, ctx && ctx.model, payload && payload.quota);
+            const sampledModel = (ctx && ctx.model) || '';
+
             if (ctx) {
                 usedEl.textContent = formatCompactTokens(ctx.usedTokens);
-                usedEl.title = formatExactTokens(ctx.usedTokens);
+                if (ctx.source === 'actual') {
+                    const detailParts = [];
+                    if (typeof ctx.actualInputTokens === 'number') {
+                        detailParts.push(`输入 ${formatExactTokens(ctx.actualInputTokens)}`);
+                    }
+                    if (typeof ctx.actualOutputTokens === 'number' && ctx.actualOutputTokens > 0) {
+                        detailParts.push(`输出 ${formatExactTokens(ctx.actualOutputTokens)}`);
+                    }
+                    const actualDesc = detailParts.length
+                        ? `实测总量 ${formatExactTokens(ctx.usedTokens)}（${detailParts.join(' + ')}）`
+                        : `实测总量 ${formatExactTokens(ctx.usedTokens)}`;
+                    usedEl.title = typeof ctx.estimatedTokens === 'number'
+                        ? `${actualDesc} / 请求前预估 ${formatExactTokens(ctx.estimatedTokens)}`
+                        : actualDesc;
+                } else {
+                    usedEl.title = `请求前预估 ${formatExactTokens(ctx.usedTokens)}（待本轮实测校准）`;
+                }
                 remEl.textContent = ctx.remainingTokens === null ? '—' : formatCompactTokens(ctx.remainingTokens);
                 remEl.title = ctx.remainingTokens === null ? '' : formatExactTokens(ctx.remainingTokens);
                 maxEl.textContent = ctx.maxTokens === null ? '不可用' : formatCompactTokens(ctx.maxTokens);
                 maxEl.title = ctx.maxTokens === null ? '' : formatExactTokens(ctx.maxTokens);
-                modelEl.textContent = ctx.model || '—';
-                modelEl.title = ctx.model || '';
             } else {
                 usedEl.textContent = '—';
                 usedEl.title = '';
@@ -2800,8 +3001,22 @@
                 remEl.title = '';
                 maxEl.textContent = '—';
                 maxEl.title = '';
-                modelEl.textContent = '—';
-                modelEl.title = '';
+            }
+
+            if (selectedModel) {
+                if (modelLabelEl) modelLabelEl.textContent = '当前模型';
+                modelEl.textContent = selectedModel;
+                if (sampledModel && normalizeClientModelKey(selectedModel) !== normalizeClientModelKey(sampledModel)) {
+                    modelEl.title = `当前已选：${selectedModel} / 上轮采样：${sampledModel}（发送新消息后刷新窗口统计）`;
+                } else if (!sampledModel) {
+                    modelEl.title = `当前已选：${selectedModel}（待发送首条消息采样）`;
+                } else {
+                    modelEl.title = selectedModel;
+                }
+            } else {
+                if (modelLabelEl) modelLabelEl.textContent = '采样模型';
+                modelEl.textContent = sampledModel || '—';
+                modelEl.title = sampledModel || '';
             }
 
             const isRunning = Boolean(payload && payload.running);
