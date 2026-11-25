@@ -13,6 +13,10 @@
     try {
         hubUtils = require('./utils');
     } catch {}
+    let windowBackends = null;
+    try {
+        windowBackends = require('./remote/windowBackends');
+    } catch {}
 
     const RPC_SERVICE = '/exa.language_server_pb.LanguageServerService/';
     const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -391,7 +395,15 @@
             }
         }
         if (!Number.isInteger(port) || port <= 0 || port > 65535 || !csrf) return null;
-        return { port, csrf, key: `${port}:${csrf}` };
+        let protocol = '';
+        if (typeof languageServer.getLsBaseUrl === 'function') {
+            try {
+                const baseUrl = String(languageServer.getLsBaseUrl() || '');
+                if (baseUrl.startsWith('https://')) protocol = 'https';
+                else if (baseUrl.startsWith('http://')) protocol = 'http';
+            } catch {}
+        }
+        return { port, csrf, protocol, key: `${port}:${csrf}` };
     }
 
     function sendRpcOnce(protocol, port, csrf, method, payloadText) {
@@ -456,7 +468,7 @@
 
     async function callLsRpc(endpoint, method, body) {
         const payloadText = JSON.stringify(body || {});
-        const preferred = portProtocols.get(endpoint.port) || 'https';
+        const preferred = portProtocols.get(endpoint.port) || endpoint.protocol || 'https';
         const order = preferred === 'https' ? ['https', 'http'] : ['http', 'https'];
         let lastErr = null;
         for (const protocol of order) {
@@ -493,7 +505,7 @@
     const QUOTA_SUMMARY_TTL_MS = 60 * 1000;
     const QUOTA_FORCE_COOLDOWN_MS = 5 * 1000;
     const CONTROL_CHARS_RE = /[\x00-\x1f\x7f\u202a-\u202e\u2066-\u2069]/g;
-    const EFFORT_SUFFIX_RE = /^(.+?)[-_ ](thinking|xhigh|high|medium|low)$/i;
+    const EFFORT_SUFFIX_RE = /^(.+?)[-_ ](thinking|xhigh|extra|max|high|medium|low)$/i;
     const UPPER_ACRONYMS = new Map([
         ['gpt', 'GPT'],
         ['oss', 'OSS'],
@@ -616,12 +628,31 @@
         return modelCatalogCache.pending;
     }
 
+    function stripModelContextWindowSuffix(label) {
+        return cleanModelText(label).replace(/\s*·\s*[^·]+$/, '').trim();
+    }
+
     function normalizeModelMatchKey(text) {
-        return cleanModelText(text).toLowerCase().replace(/[()（）\-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+        return stripModelContextWindowSuffix(text)
+            .toLowerCase()
+            .replace(/[()（）\-_]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .replace(/\s+(?:extra\s+high|extra)$/, ' xhigh');
     }
 
     function stripModelEffortSuffix(label) {
-        return cleanModelText(label).replace(/\s*\((?:Low|Medium|High|XHigh|Extra High|Thinking)\)\s*$/i, '').trim();
+        return stripModelContextWindowSuffix(label)
+            .replace(/\s*\((?:Low|Medium|High|XHigh|Extra(?:\s+High)?|Max|Thinking)\)\s*$/i, '')
+            .replace(/\s+(?:Low|Medium|High|XHigh|Extra(?:\s+High)?|Max|Thinking)\s*$/i, '')
+            .trim();
+    }
+
+    function pickRepresentativeQuotaBucket(buckets) {
+        if (!Array.isArray(buckets) || !buckets.length) return null;
+        const enabled = buckets.filter((b) => b && !b.disabled && typeof b.remainingFraction === 'number' && Number.isFinite(b.remainingFraction));
+        if (!enabled.length) return null;
+        return enabled.reduce((minB, b) => (b.remainingFraction < minB.remainingFraction ? b : minB), enabled[0]);
     }
 
     function formatBucketWindowLabel(bucket) {
@@ -710,9 +741,9 @@
             if (dn && (base.includes(dn) || dn.includes(base))) return g;
             if (desc && desc.includes(base)) return g;
         }
-        if (/argon/i.test(base)) return groups.find((g) => /argon/i.test(g.displayName)) || null;
-        if (/claude|gpt|openai/i.test(base)) return groups.find((g) => /claude|gpt/i.test(g.displayName)) || null;
-        if (/gemini|orchestrator/i.test(base)) return groups.find((g) => /gemini models/i.test(g.displayName)) || groups.find((g) => /gemini/i.test(g.displayName)) || null;
+        if (/argon/i.test(base)) return groups.find((g) => /argon/i.test(g.displayName)) || groups.find((g) => /gemini/i.test(g.displayName)) || null;
+        if (/claude|sonnet|opus|haiku|gpt|openai|oss/i.test(base)) return groups.find((g) => /claude|gpt/i.test(g.displayName)) || null;
+        if (/gemini|carbon|neon|hydrogen|flash|orchestrator/i.test(base)) return groups.find((g) => /gemini models/i.test(g.displayName)) || groups.find((g) => /gemini/i.test(g.displayName)) || null;
         return null;
     }
 
@@ -750,11 +781,7 @@
 
         const currentLabel = (current && current.label) || cleanModelText(contextModel) || '';
         const matchedGroup = hasGroups ? matchGroupForModelLabel(quotaGroups, currentLabel) : null;
-
-        let currentBucket = null;
-        if (matchedGroup && matchedGroup.buckets.length > 0) {
-            currentBucket = matchedGroup.buckets.reduce((minB, b) => (b.remainingFraction < minB.remainingFraction ? b : minB), matchedGroup.buckets[0]);
-        }
+        const currentBucket = matchedGroup ? pickRepresentativeQuotaBucket(matchedGroup.buckets) : null;
 
         return {
             current: currentBucket
@@ -1233,7 +1260,8 @@
                 canIncremental ? Math.max(0, cached.offset - 1) : 0,
                 canIncremental ? cached.lastChat : null,
                 canIncremental ? cached.cacheSlots : null,
-                canIncremental ? cached.speedSlots : null
+                canIncremental ? cached.speedSlots : null,
+                modelCatalogCache.endpointKey === endpoint.key ? modelCatalogCache.map : null
             ),
         ]);
         const modelCatalog = catalogState.map;
@@ -1278,9 +1306,25 @@
         return payload;
     }
 
-    ipcMain.handle('ag-ctx:metrics', async (event, rawId, force) => {
+    function isAuthorizedMetricsSender(event) {
         const senderUrl = event && event.senderFrame ? event.senderFrame.url : '';
-        if (!LOCAL_ORIGIN_RE.test(senderUrl)) {
+        if (!LOCAL_ORIGIN_RE.test(senderUrl)) return false;
+        if (hubUtils && typeof hubUtils.isLocalHubTopFrame === 'function') {
+            try {
+                return Boolean(hubUtils.isLocalHubTopFrame(event));
+            } catch {
+                return false;
+            }
+        }
+        const sender = event && event.sender;
+        if (sender && sender.mainFrame && event.senderFrame && event.senderFrame !== sender.mainFrame) {
+            return false;
+        }
+        return true;
+    }
+
+    ipcMain.handle('ag-ctx:metrics', async (event, rawId, force) => {
+        if (!isAuthorizedMetricsSender(event)) {
             return { status: 'offline', running: false, conversationId: null, context: null, cache: null, speed: null, breakdown: null };
         }
         const key = (typeof rawId === 'string' && UUID_RE.test(rawId) ? rawId.toLowerCase() : 'none') + ':' + (force ? '1' : '0');
@@ -1932,6 +1976,9 @@
                         justify-content: space-between;
                         gap: 8px;
                     }
+                    .quota-bucket-row[data-disabled="true"] {
+                        opacity: 0.55;
+                    }
                     .quota-bucket-left {
                         display: inline-flex;
                         align-items: baseline;
@@ -2497,7 +2544,7 @@
                     subtree: true,
                     characterData: true,
                     attributes: true,
-                    attributeFilter: ['aria-label', 'title', 'data-value'],
+                    attributeFilter: ['aria-label', 'title', 'data-value', 'data-model-label', 'data-context-window'],
                 });
             }
             if (typeof ResizeObserver !== 'function') return;
@@ -2693,49 +2740,65 @@
                 .trim();
         }
 
+        function splitDomModelContextWindow(raw) {
+            const cleaned = cleanDomModelButtonText(raw);
+            if (!cleaned) return { baseText: '', windowTag: '' };
+            const idx = cleaned.lastIndexOf('·');
+            if (idx === -1) return { baseText: cleaned, windowTag: '' };
+            const baseText = cleaned.slice(0, idx).trim();
+            const windowTag = cleaned.slice(idx + 1).trim();
+            if (!baseText || !windowTag) return { baseText: cleaned, windowTag: '' };
+            return { baseText, windowTag };
+        }
+
         function normalizeClientModelKey(raw) {
-            return cleanDomModelButtonText(raw)
+            const { baseText } = splitDomModelContextWindow(raw);
+            return baseText
                 .toLowerCase()
                 .replace(/[()（）\-_]+/g, ' ')
                 .replace(/\s+/g, ' ')
-                .trim();
+                .trim()
+                .replace(/\s+(?:extra\s+high|extra)$/, ' xhigh');
         }
 
         function formatDomModelFallback(rawText) {
-            const cleaned = cleanDomModelButtonText(rawText);
-            if (!cleaned) return '';
-            if (/\([^)]+\)\s*$/.test(cleaned)) return cleaned;
-            const m = cleaned.match(/^(.+?)\s+(Low|Medium|High|XHigh|Extra\s+High|Thinking)$/i);
-            if (m) {
-                const rawTag = m[2].replace(/\s+/g, ' ').trim();
-                const lowTag = rawTag.toLowerCase();
-                const tag = lowTag === 'xhigh'
-                    ? 'XHigh'
-                    : (lowTag === 'extra high'
-                        ? 'Extra High'
-                        : rawTag[0].toUpperCase() + rawTag.slice(1).toLowerCase());
-                return `${m[1].trim()} (${tag})`;
+            const { baseText, windowTag } = splitDomModelContextWindow(rawText);
+            if (!baseText) return '';
+            let formatted = baseText;
+            if (!/\([^)]+\)\s*$/.test(baseText)) {
+                const m = baseText.match(/^(.+?)\s+(Low|Medium|High|XHigh|Extra\s+High|Extra|Max|Thinking)$/i);
+                if (m) {
+                    const rawTag = m[2].replace(/\s+/g, ' ').trim();
+                    const lowTag = rawTag.toLowerCase();
+                    const tag = lowTag === 'xhigh'
+                        ? 'XHigh'
+                        : (lowTag === 'extra high'
+                            ? 'Extra High'
+                            : rawTag[0].toUpperCase() + rawTag.slice(1).toLowerCase());
+                    formatted = `${m[1].trim()} (${tag})`;
+                }
             }
-            return cleaned;
+            return windowTag ? `${formatted} · ${windowTag}` : formatted;
         }
 
         function resolveCanonicalDomModel(rawDomModel, ctxModel, quota) {
-            const cleaned = cleanDomModelButtonText(rawDomModel);
-            if (!cleaned) return '';
-            const key = normalizeClientModelKey(cleaned);
+            const { baseText, windowTag } = splitDomModelContextWindow(rawDomModel);
+            if (!baseText) return '';
+            const key = normalizeClientModelKey(baseText);
             if (!key) return '';
+            const attachWindow = (label) => (windowTag ? `${label} · ${windowTag}` : label);
             if (ctxModel && normalizeClientModelKey(ctxModel) === key) {
-                return ctxModel;
+                return attachWindow(splitDomModelContextWindow(ctxModel).baseText || ctxModel);
             }
             const catalogLabels = quota && Array.isArray(quota.catalogLabels) ? quota.catalogLabels : [];
             for (const lbl of catalogLabels) {
-                if (lbl && normalizeClientModelKey(lbl) === key) return lbl;
+                if (lbl && normalizeClientModelKey(lbl) === key) return attachWindow(lbl);
             }
             const models = quota && Array.isArray(quota.models) ? quota.models : [];
             for (const m of models) {
-                if (m && m.label && normalizeClientModelKey(m.label) === key) return m.label;
+                if (m && m.label && normalizeClientModelKey(m.label) === key) return attachWindow(m.label);
             }
-            return formatDomModelFallback(cleaned);
+            return formatDomModelFallback(rawDomModel);
         }
 
         function readDomSelectedModelText(inst) {
@@ -2758,8 +2821,9 @@
             for (const root of roots) {
                 const trigger = root.querySelector('[data-testid="model-selector-trigger"]');
                 if (trigger && !isOwnOrEditor(trigger)) {
-                    const txt = cleanDomModelButtonText(trigger.textContent || '');
-                    if (txt) return txt;
+                    const attrLabel = cleanDomModelButtonText(trigger.getAttribute('data-model-label') || '');
+                    const txt = attrLabel || cleanDomModelButtonText(trigger.textContent || '');
+                    if (txt && !/^no model selected$/i.test(txt)) return txt;
                 }
             }
             for (const root of roots) {
@@ -2778,9 +2842,9 @@
 
         function matchClientQuotaGroup(groups, modelText) {
             if (!Array.isArray(groups) || !groups.length || !modelText) return null;
-            const stripped = cleanDomModelButtonText(modelText)
-                .replace(/\s*\((?:Low|Medium|High|XHigh|Extra\s+High|Thinking)\)\s*$/i, '')
-                .replace(/\s+(?:Low|Medium|High|XHigh|Extra\s+High|Thinking)\s*$/i, '')
+            const stripped = splitDomModelContextWindow(modelText).baseText
+                .replace(/\s*\((?:Low|Medium|High|XHigh|Extra(?:\s+High)?|Max|Thinking)\)\s*$/i, '')
+                .replace(/\s+(?:Low|Medium|High|XHigh|Extra(?:\s+High)?|Max|Thinking)\s*$/i, '')
                 .trim()
                 .toLowerCase();
             if (!stripped) return null;
@@ -2802,6 +2866,13 @@
             return null;
         }
 
+        function pickClientQuotaBucket(buckets) {
+            if (!Array.isArray(buckets) || !buckets.length) return null;
+            const enabled = buckets.filter((b) => b && !b.disabled && typeof b.remainingFraction === 'number' && Number.isFinite(b.remainingFraction));
+            if (!enabled.length) return null;
+            return enabled.reduce((m, cur) => (cur.remainingFraction < m.remainingFraction ? cur : m), enabled[0]);
+        }
+
         function resolveActiveQuotaSummary(inst, quota) {
             if (!quota) return null;
             const domModel = readDomSelectedModelText(inst);
@@ -2809,8 +2880,8 @@
             if (domModel) {
                 if (groups.length > 0) {
                     const grp = matchClientQuotaGroup(groups, domModel);
-                    if (grp && Array.isArray(grp.buckets) && grp.buckets.length > 0) {
-                        const b = grp.buckets.reduce((m, cur) => (cur.remainingFraction < m.remainingFraction ? cur : m), grp.buckets[0]);
+                    const b = grp ? pickClientQuotaBucket(grp.buckets) : null;
+                    if (grp && b) {
                         return {
                             label: resolveCanonicalDomModel(domModel, null, quota) || domModel,
                             groupName: grp.displayName,
@@ -2840,17 +2911,18 @@
             if (quota.current && typeof quota.current.remainingFraction === 'number') {
                 return quota.current;
             }
-            if (groups.length > 0 && Array.isArray(groups[0].buckets) && groups[0].buckets.length > 0) {
-                const grp = groups[0];
-                const b = grp.buckets.reduce((m, cur) => (cur.remainingFraction < m.remainingFraction ? cur : m), grp.buckets[0]);
-                return {
-                    label: grp.displayName,
-                    groupName: grp.displayName,
-                    windowLabel: b.windowLabel,
-                    remainingFraction: b.remainingFraction,
-                    usedFraction: b.usedFraction,
-                    resetTime: b.resetTime,
-                };
+            for (const grp of groups) {
+                const b = pickClientQuotaBucket(grp && grp.buckets);
+                if (b) {
+                    return {
+                        label: grp.displayName,
+                        groupName: grp.displayName,
+                        windowLabel: b.windowLabel,
+                        remainingFraction: b.remainingFraction,
+                        usedFraction: b.usedFraction,
+                        resetTime: b.resetTime,
+                    };
+                }
             }
             return null;
         }
@@ -2882,30 +2954,35 @@
 
                 const bucketNodes = [];
                 for (const b of (g.buckets || [])) {
+                    const isDisabled = Boolean(b.disabled);
                     const rem = typeof b.remainingFraction === 'number' && Number.isFinite(b.remainingFraction)
                         ? Math.min(1, Math.max(0, b.remainingFraction))
                         : 0;
                     const usedPct = ((1 - rem) * 100).toFixed(1);
                     const remPctExact = (rem * 100).toFixed(1);
                     const remPctInt = Math.round(rem * 100);
-                    const qLevel = getQuotaLevel(rem);
-                    const showReset = Boolean(b.hasDescription || rem < 0.999);
+                    const qLevel = isDisabled ? 'idle' : getQuotaLevel(rem);
+                    const showReset = !isDisabled && Boolean(b.hasDescription || rem < 0.999);
                     const resetText = showReset ? formatResetSubtext(b.resetTime) : '';
-                    const rowTitle = `${g.displayName} · ${b.windowLabel}：已用 ${usedPct}% / 剩余 ${remPctExact}%${resetText ? `（${resetText}）` : ''}`;
+                    const rowTitle = isDisabled
+                        ? `${g.displayName} · ${b.windowLabel}：已停用`
+                        : `${g.displayName} · ${b.windowLabel}：已用 ${usedPct}% / 剩余 ${remPctExact}%${resetText ? `（${resetText}）` : ''}`;
 
                     const ringSvg = svgEl(
                         'svg',
                         { class: 'quota-ring', viewBox: '0 0 16 16', 'aria-hidden': 'true' },
                         svgEl('circle', { class: 'quota-ring-track', cx: '8', cy: '8', r: String(Q_RING_R) }),
-                        svgEl('circle', {
-                            class: 'quota-ring-arc',
-                            'data-qlevel': qLevel,
-                            cx: '8',
-                            cy: '8',
-                            r: String(Q_RING_R),
-                            'stroke-dasharray': `${(Q_RING_C * rem).toFixed(2)} ${Q_RING_C.toFixed(2)}`,
-                            transform: 'rotate(-90 8 8)',
-                        })
+                        isDisabled
+                            ? null
+                            : svgEl('circle', {
+                                class: 'quota-ring-arc',
+                                'data-qlevel': qLevel,
+                                cx: '8',
+                                cy: '8',
+                                r: String(Q_RING_R),
+                                'stroke-dasharray': `${(Q_RING_C * rem).toFixed(2)} ${Q_RING_C.toFixed(2)}`,
+                                transform: 'rotate(-90 8 8)',
+                            })
                     );
 
                     const leftChildren = [h('span', { class: 'quota-bucket-label' }, b.windowLabel || '模型额度')];
@@ -2914,12 +2991,12 @@
                     bucketNodes.push(
                         h(
                             'div',
-                            { class: 'quota-bucket-row', title: rowTitle },
+                            { class: 'quota-bucket-row', title: rowTitle, 'data-disabled': isDisabled ? 'true' : undefined },
                             h('div', { class: 'quota-bucket-left' }, ...leftChildren),
                             h(
                                 'div',
                                 { class: 'quota-bucket-right' },
-                                h('span', { class: 'quota-bucket-pct', 'data-qlevel': qLevel }, `剩余 ${remPctInt}%`),
+                                h('span', { class: 'quota-bucket-pct', 'data-qlevel': qLevel }, isDisabled ? '已停用' : `剩余 ${remPctInt}%`),
                                 ringSvg
                             )
                         )
@@ -3247,10 +3324,15 @@
         if (wcType === 'webview' || wcType === 'devtools' || wcType === 'remote' || wcType === 'offscreen' || wcType === 'backgroundPage') {
             return false;
         }
+        if (windowBackends && typeof windowBackends.remoteBackendOf === 'function') {
+            try {
+                if (windowBackends.remoteBackendOf(wc)) return false;
+            } catch {}
+        }
         if (hubUtils && typeof hubUtils.getLocalHubWindows === 'function' && typeof hubUtils.getHubWebContents === 'function') {
             try {
                 const hubWins = hubUtils.getLocalHubWindows();
-                if (Array.isArray(hubWins) && hubWins.length > 0) {
+                if (Array.isArray(hubWins)) {
                     return hubWins.some((w) => hubUtils.getHubWebContents(w) === wc);
                 }
             } catch {}

@@ -557,7 +557,7 @@ function installMonitor(resourcesDir) {
     const filePatches = {
         'dist/contextMonitor.js': monitorSrc,
         'dist/main.js': `${mainBase}\n${MONITOR_START}\ntry{require('./contextMonitor.js');}catch(_e){}\n${MONITOR_END}\n`,
-        'dist/preload.js': `${preloadBase}\n${BRIDGE_START}\ntry{electron_1.contextBridge.exposeInMainWorld('__agCtxBridge',{getMetrics:(id,force,details)=>electron_1.ipcRenderer.invoke('ag-ctx:metrics',id,Boolean(force),Boolean(details))});}catch(_e){}\n${BRIDGE_END}\n`,
+        'dist/preload.js': `${preloadBase}\n${BRIDGE_START}\ntry{if(typeof isRemoteWindow==='undefined'||!isRemoteWindow){electron_1.contextBridge.exposeInMainWorld('__agCtxBridge',{getMetrics:(id,force)=>electron_1.ipcRenderer.invoke('ag-ctx:metrics',id,Boolean(force))});}}catch(_e){}\n${BRIDGE_END}\n`,
     };
 
     const tempAsarPath = path.join(resourcesDir, 'app.asar.tmp');
